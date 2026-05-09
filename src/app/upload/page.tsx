@@ -1,195 +1,269 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/layout";
+import { cn } from "@/lib/utils";
+import {
+  supabase,
+  VALID_INVITATION_CODE,
+  createUploadRecord,
+  uploadCatalogPDF,
+  updateUploadFileUrl,
+  getUserProfile,
+  updateInvitationCode,
+} from "@/lib/supabase";
 
 export default function UploadPage() {
-  const [isDragging, setIsDragging] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
+  const router = useRouter();
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [inviteCode, setInviteCode] = useState("");
+  const [isVerified, setIsVerified] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState<any>(null);
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (!data.user) {
+        router.replace("/login");
+      } else {
+        setUser(data.user);
+        getUserProfile(data.user.id).then((profile) => {
+          if (profile?.invitation_code === VALID_INVITATION_CODE) {
+            setIsVerified(true);
+          }
+          setLoading(false);
+        });
+      }
+    });
+  }, [router]);
 
-  const handleDragLeave = () => {
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    // Simulate upload
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      simulateUpload(file.name);
+  const handleVerify = async () => {
+    if (inviteCode === VALID_INVITATION_CODE) {
+      const success = await updateInvitationCode(user.id, inviteCode);
+      if (success) {
+        setIsVerified(true);
+        setError(null);
+      } else {
+        setError("Failed to update profile. Please try again.");
+      }
+    } else {
+      setError("Invalid invitation code.");
     }
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      simulateUpload(file.name);
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const selectedFile = e.target.files[0];
+      if (selectedFile.type !== "application/pdf") {
+        setError("Please upload a PDF file.");
+        return;
+      }
+      if (selectedFile.size > 500 * 1024 * 1024) {
+        setError("File size exceeds 500MB limit.");
+        return;
+      }
+      setFile(selectedFile);
+      setError(null);
     }
   };
 
-  const simulateUpload = (name: string) => {
-    setFileName(name);
-    setUploadProgress(0);
-    const interval = setInterval(() => {
-      setUploadProgress((prev) => {
-        if (prev === null || prev >= 100) {
-          clearInterval(interval);
-          return 100;
-        }
-        return prev + 10;
-      });
-    }, 300);
+  const handleUpload = async () => {
+    if (!file || !user) return;
+
+    setUploading(true);
+    setError(null);
+
+    try {
+      // 1. Create database record
+      const uploadRecord = await createUploadRecord(user.id, file.name, file.size);
+      if (!uploadRecord) throw new Error("Failed to create upload record.");
+
+      // 2. Upload to Storage
+      const publicUrl = await uploadCatalogPDF(user.id, file, uploadRecord.id);
+      if (!publicUrl) throw new Error("Failed to upload file to storage.");
+
+      // 3. Update record with URL
+      await updateUploadFileUrl(uploadRecord.id, publicUrl);
+
+      // 4. Trigger worker
+      try {
+        await fetch(`${process.env.NEXT_PUBLIC_WORKER_URL || 'http://localhost:8000'}/process/${uploadRecord.id}`, { 
+          method: 'POST',
+          mode: 'no-cors' // Worker might be on different domain
+        });
+      } catch (e) {
+        console.warn("Worker trigger failed, but upload succeeded:", e);
+      }
+
+      router.push(`/upload/${uploadRecord.id}/processing`);
+    } catch (err: any) {
+      setError(err.message || "An error occurred during upload.");
+      setUploading(false);
+    }
   };
+
+  if (loading) {
+    return (
+      <AppShell>
+        <div className="flex items-center justify-center min-h-[60vh]">
+          <span className="material-symbols-outlined animate-spin text-4xl text-primary">
+            progress_activity
+          </span>
+        </div>
+      </AppShell>
+    );
+  }
 
   return (
-    <AppShell showSidebar={false}>
-      <div className="flex flex-col items-center justify-center min-h-[calc(100vh-64px)] p-4 md:p-[48px]">
-        <div className="w-full max-w-2xl">
-          {/* Header */}
-          <div className="text-center mb-10">
-            <h1 className="font-heading text-[48px] leading-[1.2] font-bold text-primary mb-3">
-              Upload Catalogue
-            </h1>
-            <p className="font-body text-[16px] leading-[1.6] text-text-secondary max-w-md mx-auto">
-              Upload a PDF flower variety catalogue. Our AI will extract all
-              variety images and metadata automatically.
+    <AppShell>
+      <div className="max-w-4xl mx-auto p-4 md:p-12">
+        <h1 className="font-heading text-[40px] font-bold text-primary mb-2">
+          Upload Catalogue
+        </h1>
+        <p className="font-body text-[16px] text-text-secondary mb-10">
+          Upload a flower variety PDF catalog to extract structured data.
+        </p>
+
+        {!isVerified ? (
+          <div className="bg-surface rounded-2xl border border-border-muted p-8 shadow-sm max-w-md">
+            <div className="flex items-center gap-3 mb-6">
+              <span className="material-symbols-outlined text-primary text-3xl">
+                lock
+              </span>
+              <h2 className="font-heading text-xl font-bold text-text-primary">
+                Verification Required
+              </h2>
+            </div>
+            <p className="font-body text-[14px] text-text-secondary mb-6">
+              Please enter your invitation code to enable catalog uploads.
             </p>
-          </div>
-
-          {/* Upload Area */}
-          <div
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            className={`relative border-2 border-dashed rounded-xl p-12 text-center transition-all duration-200 ${
-              isDragging
-                ? "border-primary bg-primary-fixed/20 scale-[1.02]"
-                : "border-border-muted bg-surface hover:border-primary/50 hover:bg-surface-container-low"
-            }`}
-          >
-            <input
-              type="file"
-              accept=".pdf"
-              onChange={handleFileSelect}
-              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-            />
-
-            <div className="flex flex-col items-center gap-4">
-              <div className="w-20 h-20 rounded-full bg-primary-fixed/30 flex items-center justify-center">
-                <span className="material-symbols-outlined text-4xl text-primary">
-                  cloud_upload
-                </span>
-              </div>
-              <div>
-                <p className="font-body text-[16px] leading-[1.6] text-on-surface font-medium mb-1">
-                  Drag &amp; drop your PDF here
+            <div className="space-y-4">
+              <input
+                type="text"
+                value={inviteCode}
+                onChange={(e) => setInviteCode(e.target.value)}
+                placeholder="Enter invitation code"
+                className="w-full bg-surface-container-low border border-border-muted rounded-lg px-4 py-3 font-mono text-[16px] tracking-widest focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+              {error && (
+                <p className="text-confidence-low text-[13px] font-body">
+                  {error}
                 </p>
-                <p className="font-body text-[13px] leading-[1.4] text-text-secondary">
-                  or click to browse files
-                </p>
-              </div>
-              <div className="flex items-center gap-4 mt-2">
-                <span className="font-body text-[11px] leading-[1.2] text-text-secondary bg-surface-container px-3 py-1 rounded-full">
-                  PDF only
-                </span>
-                <span className="font-body text-[11px] leading-[1.2] text-text-secondary bg-surface-container px-3 py-1 rounded-full">
-                  Max 500MB
-                </span>
-              </div>
+              )}
+              <button
+                onClick={handleVerify}
+                className="w-full bg-primary text-white rounded-lg py-3 font-body font-bold hover:bg-primary/90 transition-colors"
+              >
+                Verify & Unlock
+              </button>
             </div>
           </div>
-
-          {/* Upload Progress */}
-          {uploadProgress !== null && (
-            <div className="mt-6 bg-surface rounded-xl border border-border-muted p-6 shadow-sm">
-              <div className="flex items-center gap-4 mb-4">
-                <div className="w-10 h-10 rounded-lg bg-primary-container flex items-center justify-center text-on-primary-container">
-                  <span className="material-symbols-outlined text-[20px]">
-                    description
+        ) : (
+          <div className="space-y-8">
+            {/* Upload Area */}
+            <div
+              className={cn(
+                "border-2 border-dashed rounded-3xl p-12 flex flex-col items-center justify-center transition-all",
+                file
+                  ? "border-primary bg-primary/5"
+                  : "border-border-muted bg-surface hover:border-primary/50"
+              )}
+            >
+              <input
+                type="file"
+                id="file-upload"
+                className="hidden"
+                accept=".pdf"
+                onChange={handleFileChange}
+                disabled={uploading}
+              />
+              <label
+                htmlFor="file-upload"
+                className="flex flex-col items-center cursor-pointer"
+              >
+                <div className="w-20 h-20 rounded-full bg-surface-container-low flex items-center justify-center mb-6">
+                  <span className="material-symbols-outlined text-primary text-4xl">
+                    {file ? "description" : "upload_file"}
                   </span>
                 </div>
-                <div className="flex-1">
-                  <p className="font-body text-[14px] leading-[1.5] text-text-primary font-medium">
-                    {fileName}
-                  </p>
-                  <p className="font-body text-[11px] leading-[1.2] text-text-secondary">
-                    {uploadProgress < 100
-                      ? "Uploading..."
-                      : "Upload complete!"}
-                  </p>
-                </div>
-                <span className="font-body text-[12px] leading-[1.2] tracking-[0.05em] font-bold text-primary">
-                  {uploadProgress}%
+                <h3 className="font-heading text-xl font-bold text-text-primary mb-2">
+                  {file ? file.name : "Select PDF Catalogue"}
+                </h3>
+                <p className="font-body text-[14px] text-text-secondary text-center max-w-xs">
+                  {file
+                    ? `${(file.size / (1024 * 1024)).toFixed(2)} MB`
+                    : "Drag and drop your PDF here, or click to browse. Max 500MB."}
+                </p>
+              </label>
+            </div>
+
+            {error && (
+              <div className="bg-confidence-low/10 border border-confidence-low/30 rounded-xl p-4 flex items-center gap-3">
+                <span className="material-symbols-outlined text-confidence-low">
+                  error
                 </span>
+                <p className="font-body text-[14px] text-confidence-low">
+                  {error}
+                </p>
               </div>
+            )}
 
-              {/* Progress Bar */}
-              <div className="w-full h-2 bg-surface-container rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-primary rounded-full transition-all duration-300 ease-out"
-                  style={{ width: `${uploadProgress}%` }}
-                />
-              </div>
-
-              {uploadProgress === 100 && (
-                <div className="mt-4 flex justify-end">
-                  <button className="px-6 py-2.5 rounded-lg bg-primary text-on-primary font-body text-[12px] leading-[1.2] tracking-[0.05em] font-bold hover:bg-surface-tint transition-colors shadow-sm flex items-center gap-2">
-                    <span className="material-symbols-outlined text-[18px]">
-                      play_arrow
+            <div className="flex justify-end gap-4">
+              <button
+                onClick={() => setFile(null)}
+                disabled={!file || uploading}
+                className="px-6 py-3 rounded-full font-body text-[14px] font-bold text-text-secondary hover:bg-surface-container transition-colors disabled:opacity-30"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleUpload}
+                disabled={!file || uploading}
+                className="px-8 py-3 bg-primary text-white rounded-full font-body text-[14px] font-bold hover:bg-primary/90 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {uploading ? (
+                  <>
+                    <span className="material-symbols-outlined animate-spin text-[18px]">
+                      progress_activity
                     </span>
-                    Start Processing
-                  </button>
-                </div>
-              )}
+                    Uploading...
+                  </>
+                ) : (
+                  "Start Processing"
+                )}
+              </button>
             </div>
-          )}
 
-          {/* Info Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-8">
-            <div className="bg-surface rounded-xl border border-border-muted p-5">
-              <span className="material-symbols-outlined text-primary mb-3 block">
-                auto_awesome
-              </span>
-              <h3 className="font-body text-[14px] leading-[1.5] font-medium text-text-primary mb-1">
-                AI Extraction
-              </h3>
-              <p className="font-body text-[13px] leading-[1.4] text-text-secondary">
-                Automatically extracts variety images and metadata from PDF
-                pages.
-              </p>
-            </div>
-            <div className="bg-surface rounded-xl border border-border-muted p-5">
-              <span className="material-symbols-outlined text-primary mb-3 block">
-                verified
-              </span>
-              <h3 className="font-body text-[14px] leading-[1.5] font-medium text-text-primary mb-1">
-                Quality Scoring
-              </h3>
-              <p className="font-body text-[13px] leading-[1.4] text-text-secondary">
-                Each image is scored for resolution, clarity, and composition.
-              </p>
-            </div>
-            <div className="bg-surface rounded-xl border border-border-muted p-5">
-              <span className="material-symbols-outlined text-primary mb-3 block">
-                psychology
-              </span>
-              <h3 className="font-body text-[14px] leading-[1.5] font-medium text-text-primary mb-1">
-                Smart Naming
-              </h3>
-              <p className="font-body text-[13px] leading-[1.4] text-text-secondary">
-                AI detects crop, series, variety name, and breeder code
-                automatically.
-              </p>
+            {/* Guidelines */}
+            <div className="bg-surface-container-low rounded-2xl p-6 border border-border-muted">
+              <h4 className="font-heading text-[14px] font-bold text-text-primary mb-4 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px]">
+                  info
+                </span>
+                Upload Guidelines
+              </h4>
+              <ul className="space-y-3">
+                {[
+                  "Only PDF files are supported for extraction.",
+                  "High-resolution PDFs (300dpi) yield better extraction results.",
+                  "Processing time depends on page count (approx. 2s per page).",
+                  "All extracted data will be public by default.",
+                ].map((text, i) => (
+                  <li
+                    key={i}
+                    className="font-body text-[13px] text-text-secondary flex items-start gap-2"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-primary/40 mt-1.5 flex-shrink-0" />
+                    {text}
+                  </li>
+                ))}
+              </ul>
             </div>
           </div>
-        </div>
+        )}
       </div>
     </AppShell>
   );
