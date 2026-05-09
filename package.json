@@ -9,13 +9,6 @@
     "start": "next start",
     "lint": "next lint"
   },
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "^11.0.8",
-      "onFail": "download"
-    }
-  },
   "type": "module",
   "dependencies": {
     "next": "^16.2.6",
