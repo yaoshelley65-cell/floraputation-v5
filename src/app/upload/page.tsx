@@ -14,6 +14,8 @@ import {
   updateInvitationCode,
 } from "@/lib/supabase";
 
+const WORKER_URL = process.env.NEXT_PUBLIC_WORKER_URL || "https://floraputation-v5-worker.onrender.com";
+
 export default function UploadPage() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
@@ -77,27 +79,32 @@ export default function UploadPage() {
     setError(null);
 
     try {
-      // 1. Create database record
+      // 1. Create database record (status: 'pending')
       const uploadRecord = await createUploadRecord(user.id, file.name, file.size);
       if (!uploadRecord) throw new Error("Failed to create upload record.");
 
-      // 2. Upload to Storage
+      // 2. Upload PDF to Supabase Storage "catalogs" bucket
       const publicUrl = await uploadCatalogPDF(user.id, file, uploadRecord.id);
       if (!publicUrl) throw new Error("Failed to upload file to storage.");
 
-      // 3. Update record with URL
+      // 3. Update record with file_url
       await updateUploadFileUrl(uploadRecord.id, publicUrl);
 
-      // 4. Trigger worker
-      try {
-        await fetch(`${process.env.NEXT_PUBLIC_WORKER_URL || 'http://localhost:8000'}/process/${uploadRecord.id}`, { 
-          method: 'POST',
-          mode: 'no-cors' // Worker might be on different domain
-        });
-      } catch (e) {
-        console.warn("Worker trigger failed, but upload succeeded:", e);
+      // 4. Call Worker API to trigger processing
+      const workerResponse = await fetch(`${WORKER_URL}/process/${uploadRecord.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!workerResponse.ok) {
+        const errData = await workerResponse.json().catch(() => ({}));
+        console.warn("Worker trigger response:", errData);
+        // Don't throw - the upload succeeded, worker might process later
       }
 
+      // 5. Redirect to processing page
       router.push(`/upload/${uploadRecord.id}/processing`);
     } catch (err: any) {
       setError(err.message || "An error occurred during upload.");
