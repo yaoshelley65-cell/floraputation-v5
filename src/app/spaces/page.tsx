@@ -11,6 +11,15 @@ import {
   type Space,
 } from "@/lib/supabase";
 
+interface Upload {
+  id: string;
+  catalog_name: string;
+  status: string;
+  page_count: number | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
 export default function SpacesPage() {
   const router = useRouter();
   const [spaces, setSpaces] = useState<Space[]>([]);
@@ -20,6 +29,8 @@ export default function SpacesPage() {
   const [newSpaceName, setNewSpaceName] = useState("");
   const [newSpaceDesc, setNewSpaceDesc] = useState("");
   const [creating, setCreating] = useState(false);
+  const [uploads, setUploads] = useState<Upload[]>([]);
+  const [uploadsCount, setUploadsCount] = useState(0);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -36,6 +47,15 @@ export default function SpacesPage() {
     setLoading(true);
     const data = await getUserSpaces(userId);
     setSpaces(data);
+    // Load uploads
+    const { data: uploadsData, count } = await supabase
+      .from("uploads")
+      .select("id, catalog_name, status, page_count, created_at, completed_at", { count: "exact" })
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(5);
+    setUploads(uploadsData || []);
+    setUploadsCount(count || 0);
     setLoading(false);
   }
 
@@ -92,6 +112,65 @@ export default function SpacesPage() {
             <span className="material-symbols-outlined">add</span>
             New Space
           </button>
+        </div>
+
+        {/* My Uploads Section */}
+        <div
+          onClick={() => router.push("/spaces/uploads")}
+          className="bg-surface rounded-2xl border border-border-muted p-6 hover:shadow-lg transition-all cursor-pointer group mb-8"
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center group-hover:bg-primary group-hover:text-white transition-colors">
+                <span className="material-symbols-outlined">upload_file</span>
+              </div>
+              <div>
+                <h3 className="font-heading text-xl font-bold text-text-primary">
+                  My Uploads
+                </h3>
+                <p className="font-body text-[13px] text-text-secondary">
+                  {uploadsCount} catalogue{uploadsCount !== 1 ? "s" : ""} uploaded
+                </p>
+              </div>
+            </div>
+            <span className="material-symbols-outlined text-outline group-hover:text-primary transition-colors">
+              chevron_right
+            </span>
+          </div>
+          {uploads.length > 0 && (
+            <div className="space-y-2 border-t border-border-muted pt-4">
+              {uploads.slice(0, 3).map((upload) => (
+                <div key={upload.id} className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[16px] text-text-secondary">description</span>
+                    <span className="font-body text-[13px] text-text-primary truncate max-w-[200px]">
+                      {upload.catalog_name}
+                    </span>
+                  </div>
+                  <span className={`font-body text-[11px] px-2 py-0.5 rounded-full ${
+                    upload.status === "completed" ? "bg-confidence-high/10 text-confidence-high" :
+                    upload.status === "processing" ? "bg-primary/10 text-primary" :
+                    upload.status === "failed" ? "bg-confidence-low/10 text-confidence-low" :
+                    "bg-surface-container text-text-secondary"
+                  }`}>
+                    {upload.status}
+                  </span>
+                </div>
+              ))}
+              {uploadsCount > 3 && (
+                <p className="font-body text-[12px] text-text-secondary text-center pt-1">
+                  +{uploadsCount - 3} more
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Spaces Grid */}
+        <div className="flex justify-between items-end mb-6">
+          <h2 className="font-heading text-[24px] leading-[1.3] font-bold text-text-primary">
+            My Collections
+          </h2>
         </div>
 
         {spaces.length === 0 ? (
