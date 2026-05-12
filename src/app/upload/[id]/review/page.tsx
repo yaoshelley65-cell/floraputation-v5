@@ -35,6 +35,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     detected_code: "",
   });
   const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  const showToast = (message: string, type: "success" | "error" = "success") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  };
 
   const fetchImages = useCallback(async () => {
     const { data, error } = await supabase
@@ -116,47 +122,129 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         )
       );
       setEditingId(null);
+      showToast("Changes saved successfully");
     } else {
       console.error("Error saving edit:", error);
+      showToast("Failed to save changes", "error");
     }
     setSaving(false);
   };
 
-  const batchConfirm = async () => {
-    const ids = selectedIds.size > 0 ? Array.from(selectedIds) : images.map((img) => img.id);
+  // Create variety records from validated extracted images
+  const createVarietiesFromImages = async (imagesToConfirm: ExtractedImage[]) => {
+    const { data: userData } = await supabase.auth.getUser();
+    const userId = userData.user?.id || null;
+
+    let created = 0;
+    let skipped = 0;
+
+    for (const img of imagesToConfirm) {
+      // Skip images without a variety name
+      if (!img.detected_variety && !img.detected_crop) {
+        skipped++;
+        continue;
+      }
+
+      // Check for existing variety with same crop+series+variety to avoid duplicates
+      let query = supabase.from("varieties").select("id");
+      if (img.detected_crop) query = query.eq("crop", img.detected_crop);
+      if (img.detected_series) query = query.eq("series", img.detected_series);
+      if (img.detected_variety) query = query.eq("variety", img.detected_variety);
+
+      const { data: existing } = await query.limit(1);
+
+      if (existing && existing.length > 0) {
+        // Link existing variety to this extracted image
+        await supabase
+          .from("extracted_images")
+          .update({ variety_id: existing[0].id })
+          .eq("id", img.id);
+        skipped++;
+        continue;
+      }
+
+      // Create new variety record
+      const { data: newVariety, error: insertError } = await supabase
+        .from("varieties")
+        .insert({
+          crop: img.detected_crop,
+          series: img.detected_series,
+          variety: img.detected_variety,
+          code: img.detected_code,
+          image_url: img.processed_image_url,
+          quality_score: img.quality_score,
+          source_upload_id: uploadId,
+          created_by: userId,
+        })
+        .select("id")
+        .single();
+
+      if (!insertError && newVariety) {
+        // Link variety_id back to extracted_image
+        await supabase
+          .from("extracted_images")
+          .update({ variety_id: newVariety.id })
+          .eq("id", img.id);
+        created++;
+      } else {
+        console.error("Error creating variety:", insertError);
+      }
+    }
+
+    return { created, skipped };
+  };
+
+  const confirmAndCreateVarieties = async (ids: string[]) => {
     setSaving(true);
 
+    // Step 1: Mark as validated
     const { error } = await supabase
       .from("extracted_images")
       .update({ validated: true })
       .in("id", ids);
 
-    if (!error) {
-      setImages((prev) =>
-        prev.map((img) => (ids.includes(img.id) ? { ...img, validated: true } : img))
-      );
-      setSelectedIds(new Set());
-    } else {
-      console.error("Error batch confirming:", error);
+    if (error) {
+      console.error("Error confirming:", error);
+      showToast("Failed to confirm images", "error");
+      setSaving(false);
+      return;
     }
+
+    // Step 2: Create variety records
+    const imagesToConfirm = images.filter((img) => ids.includes(img.id));
+    const { created, skipped } = await createVarietiesFromImages(imagesToConfirm);
+
+    // Step 3: Update local state
+    setImages((prev) =>
+      prev.map((img) => (ids.includes(img.id) ? { ...img, validated: true } : img))
+    );
+    setSelectedIds(new Set());
+
+    // Step 4: Show success toast
+    const total = ids.length;
+    showToast(
+      `Confirmed ${total} images. ${created} new varieties added to database${skipped > 0 ? `, ${skipped} duplicates skipped` : ""}.`
+    );
+
     setSaving(false);
+
+    // Step 5: If all images are now validated, redirect after a short delay
+    const allValidated = images.every((img) => ids.includes(img.id) || img.validated);
+    if (allValidated) {
+      setTimeout(() => {
+        router.push("/search");
+      }, 2500);
+    }
+  };
+
+  const batchConfirm = async () => {
+    const ids = selectedIds.size > 0 ? Array.from(selectedIds) : images.map((img) => img.id);
+    await confirmAndCreateVarieties(ids);
   };
 
   const confirmAll = async () => {
-    setSaving(true);
     const allIds = images.map((img) => img.id);
-
-    const { error } = await supabase
-      .from("extracted_images")
-      .update({ validated: true })
-      .in("id", allIds);
-
-    if (!error) {
-      setImages((prev) => prev.map((img) => ({ ...img, validated: true })));
-    } else {
-      console.error("Error confirming all:", error);
-    }
-    setSaving(false);
+    await confirmAndCreateVarieties(allIds);
   };
 
   const deleteSelected = async () => {
@@ -172,8 +260,10 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     if (!error) {
       setImages((prev) => prev.filter((img) => !ids.includes(img.id)));
       setSelectedIds(new Set());
+      showToast(`Deleted ${ids.length} images`);
     } else {
       console.error("Error deleting:", error);
+      showToast("Failed to delete images", "error");
     }
     setSaving(false);
   };
@@ -192,6 +282,23 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
 
   return (
     <AppShell showSidebar={false}>
+      {/* Toast Notification */}
+      {toast && (
+        <div className={cn(
+          "fixed top-6 right-6 z-[100] px-6 py-4 rounded-xl shadow-lg border transition-all animate-in slide-in-from-top-2 duration-300",
+          toast.type === "success"
+            ? "bg-confidence-high/10 border-confidence-high/30 text-confidence-high"
+            : "bg-confidence-low/10 border-confidence-low/30 text-confidence-low"
+        )}>
+          <div className="flex items-center gap-3">
+            <span className="material-symbols-outlined text-[20px]">
+              {toast.type === "success" ? "check_circle" : "error"}
+            </span>
+            <span className="font-body text-[14px] font-medium">{toast.message}</span>
+          </div>
+        </div>
+      )}
+
       <div className="p-4 md:p-[48px] pb-24">
         {/* Header */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
@@ -201,28 +308,28 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             </h1>
             <p className="font-body text-[14px] leading-[1.5] text-text-secondary">
               Review AI-extracted varieties. Low confidence items are highlighted.
-              {images.length > 0 && ` (${images.length} items)`}
+              {images.length > 0 && ` (${images.length} items, ${images.filter(i => i.validated).length} validated)`}
             </p>
           </div>
           <div className="flex items-center gap-3">
             <button
-              onClick={() => router.push("/upload")}
+              onClick={() => router.push("/spaces/uploads")}
               className="px-4 py-2 rounded-lg border border-outline-variant text-text-secondary font-body text-[12px] leading-[1.2] tracking-[0.05em] font-bold hover:bg-surface-container-highest transition-colors flex items-center gap-2"
             >
               <span className="material-symbols-outlined text-[18px]">
                 arrow_back
               </span>
-              Back
+              My Uploads
             </button>
             <button
               onClick={confirmAll}
-              disabled={saving || images.length === 0}
+              disabled={saving || images.length === 0 || images.every(i => i.validated)}
               className="px-6 py-2 rounded-lg bg-primary text-on-primary font-body text-[12px] leading-[1.2] tracking-[0.05em] font-bold hover:bg-primary/90 transition-colors flex items-center gap-2 shadow-sm disabled:opacity-50"
             >
               <span className="material-symbols-outlined text-[18px]">
-                check_circle
+                {saving ? "sync" : "check_circle"}
               </span>
-              Confirm All
+              {saving ? "Processing..." : images.every(i => i.validated) ? "All Confirmed" : "Confirm All"}
             </button>
           </div>
         </div>
@@ -280,7 +387,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
                     className={cn(
                       "grid grid-cols-[48px_56px_2fr_1.5fr_1fr_1.5fr_1fr] items-center px-4 py-2 border-b border-border-muted hover:bg-surface-container-lowest transition-colors group",
                       img.validated && "bg-primary-fixed/10 hover:bg-primary-fixed/20",
-                      confidence === "low" && "shadow-[inset_4px_0_0_0_#E6A2A2]"
+                      confidence === "low" && !img.validated && "shadow-[inset_4px_0_0_0_#E6A2A2]"
                     )}
                   >
                     <div className="flex items-center justify-center">
@@ -318,11 +425,13 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
                       <span
                         className={cn(
                           "font-body text-[11px] leading-[1.2] text-text-secondary",
-                          confidence === "low" && "text-error"
+                          confidence === "low" && !img.validated && "text-error"
                         )}
                       >
                         {img.detected_code || `Page ${img.page_number || "?"}`}
-                        {img.validated && " • Validated"}
+                        {img.validated && (
+                          <span className="text-confidence-high"> • ✓ Validated</span>
+                        )}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -474,9 +583,9 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
               className="px-6 py-2 rounded-lg bg-primary text-on-primary font-body text-[12px] leading-[1.2] tracking-[0.05em] font-bold hover:bg-primary/90 transition-colors flex items-center gap-2 shadow-sm disabled:opacity-50"
             >
               <span className="material-symbols-outlined text-[18px]">
-                check_circle
+                {saving ? "sync" : "check_circle"}
               </span>
-              {selectedIds.size > 0 ? "Batch Confirm" : "Confirm All"}
+              {saving ? "Processing..." : selectedIds.size > 0 ? "Batch Confirm" : "Confirm All"}
             </button>
           </div>
         </div>
